@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>猫的第六感 · 中文潜台词解码器</title>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=Noto+Sans+SC:wght@300;400;500;700;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <div id="crt-overlay"></div>
+
+  <div id="app">
+
+    <!-- ===== 顶部栏 ===== -->
+    <header id="topbar">
+      <div class="brand">
+        <span class="brand-icon">🐱</span>
+        <div class="brand-text">
+          <span class="brand-title">猫的第六感</span>
+          <span class="brand-sub">中文潜台词解码器</span>
+        </div>
+      </div>
+      <div id="stats">
+        <div class="stat-item">
+          <span class="stat-num" id="stat-insight">0</span>
+          <span class="stat-label">洞察</span>
+        </div>
+        <div class="stat-item">
+          <span class="stat-num" id="stat-streak">0</span>
+          <span class="stat-label">连击</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ===== 主区域 ===== -->
+    <main id="main">
+
+      <!-- 输入区 -->
+      <section id="input-section">
+        <div id="cat-stage">
+          <div id="cat-aura"></div>
+          <canvas id="cat-canvas"></canvas>
+        </div>
+
+        <h1 id="hero-title">TA发的消息，<br/>真的只是字面意思吗？</h1>
+        <p id="hero-sub">粘贴一条消息，猫猫帮你读出对方没说出口的部分</p>
+
+        <!-- 人物档案选择器 -->
+        <div id="profile-selector">
+          <span class="profile-label">分析对象：</span>
+          <button id="btn-select-profile" class="profile-pick">
+            <span id="profile-current-name">通用场景（无背景）</span>
+            <span class="profile-arrow">▾</span>
+          </button>
+        </div>
+
+        <div id="input-box">
+          <textarea id="msg-input" placeholder="粘贴TA发来的消息，或者你想发的消息…&#10;例：「随便吧」「嗯」「在吗」" rows="3"></textarea>
+          <button id="btn-decode" class="btn-decode">
+            <span>让猫猫解码</span>
+            <span class="btn-arrow">→</span>
+          </button>
+        </div>
+
+        <div id="examples">
+          <span class="examples-label">试试这些：</span>
+          <button class="example-chip" data-text="随便吧">「随便吧」</button>
+          <button class="example-chip" data-text="嗯">「嗯」</button>
+          <button class="example-chip" data-text="在吗">「在吗」</button>
+          <button class="example-chip" data-text="随便你">「随便你」</button>
+          <button class="example-chip" data-text="我没事">「我没事」</button>
+          <button class="example-chip" data-text="你看着办">「你看着办」</button>
+        </div>
+      </section>
+
+      <!-- 结果区（解码后显示） -->
+      <section id="result-section" class="hidden">
+        <div id="result-card">
+          <div id="result-header">
+            <span id="result-emotion-badge"></span>
+            <span id="result-danger-badge"></span>
+          </div>
+
+          <div id="result-original">
+            <div class="result-label">原消息</div>
+            <div id="result-original-text"></div>
+          </div>
+
+          <div class="result-row result-surface">
+            <div class="result-label">▸ 字面意思</div>
+            <div class="result-val"></div>
+          </div>
+
+          <div class="result-row result-real">
+            <div class="result-label">▸ TA真实情绪</div>
+            <div class="result-val result-highlight"></div>
+          </div>
+
+          <div class="result-row result-want">
+            <div class="result-label">▸ TA真正想要</div>
+            <div class="result-val"></div>
+          </div>
+
+          <div class="result-row result-subtext">
+            <div class="result-label">▸ 潜台词</div>
+            <div class="result-val result-quote"></div>
+          </div>
+
+          <div class="result-row result-clue">
+            <div class="result-label">▸ 猫猫的背景推测</div>
+            <div class="result-val"></div>
+          </div>
+
+          <div class="result-reply">
+            <div class="result-label">✦ 建议回复</div>
+            <div id="result-reply-text"></div>
+            <button id="btn-copy-reply" class="btn-copy">复制</button>
+          </div>
+
+          <div id="result-cat-whisper">
+            <span class="whisper-icon">🐱</span>
+            <span id="whisper-text"></span>
+          </div>
+
+          <div id="result-actions">
+            <button id="btn-share" class="btn-action">
+              <span>📸</span> 生成分享图
+            </button>
+            <button id="btn-again" class="btn-action btn-primary">
+              <span>再解一条</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+    </main>
+
+    <!-- ===== 历史记录抽屉 ===== -->
+    <button id="btn-history" class="floating-btn" title="解码历史">
+      <span>📜</span>
+    </button>
+
+    <div id="history-drawer" class="drawer hidden">
+      <div class="drawer-header">
+        <span>解码历史</span>
+        <button id="btn-close-history" class="btn-close">✕</button>
+      </div>
+      <div id="history-list"></div>
+      <div id="history-empty" class="history-empty">
+        <span style="font-size:40px;opacity:0.4">🌙</span>
+        <p>还没有解码记录<br/>去试试读一条消息吧</p>
+      </div>
+    </div>
+
+    <!-- ===== 分享图预览 ===== -->
+    <div id="share-modal" class="modal hidden">
+      <div id="share-content">
+        <canvas id="share-canvas"></canvas>
+        <p id="share-hint">长按或右键保存图片</p>
+        <div id="share-actions">
+          <button id="btn-download-share" class="btn-action btn-primary">下载图片</button>
+          <button id="btn-close-share" class="btn-action">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 人物档案管理 ===== -->
+    <div id="profile-drawer" class="drawer hidden">
+      <div class="drawer-header">
+        <span>📋 人物档案</span>
+        <button id="btn-close-profile" class="btn-close">✕</button>
+      </div>
+      <div id="profile-list-view">
+        <button id="btn-new-profile" class="btn-action btn-primary" style="width:100%;margin-bottom:12px;">
+          ＋ 新建档案
+        </button>
+        <div id="profile-list"></div>
+        <div id="profile-empty" class="history-empty">
+          <span style="font-size:40px;opacity:0.4">🗂️</span>
+          <p>还没有档案<br/>建一个让猫猫更懂TA</p>
+        </div>
+      </div>
+
+      <div id="profile-edit-view" class="hidden">
+        <div class="profile-edit-header">
+          <button id="btn-back-profile-list" class="btn-close">←</button>
+          <span id="profile-edit-title">新建档案</span>
+          <button id="btn-delete-profile" class="btn-close" style="color:var(--red)">删</button>
+        </div>
+        <div class="profile-form">
+          <div class="form-row">
+            <label>称呼 *</label>
+            <input type="text" id="pf-name" placeholder="怎么叫TA？如：小王、老板、前任" maxlength="20">
+          </div>
+          <div class="form-row">
+            <label>关系</label>
+            <select id="pf-relation">
+              <option value="">选择关系</option>
+              <option value="恋人">恋人</option>
+              <option value="前任">前任</option>
+              <option value="暧昧对象">暧昧对象</option>
+              <option value="暗恋对象">暗恋对象</option>
+              <option value="朋友">朋友</option>
+              <option value="闺蜜/兄弟">闺蜜/兄弟</option>
+              <option value="同事">同事</option>
+              <option value="领导">领导</option>
+              <option value="下属">下属</option>
+              <option value="家人">家人</option>
+              <option value="父母">父母</option>
+              <option value="客户">客户</option>
+              <option value="网友">网友</option>
+              <option value="陌生人">陌生人</option>
+              <option value="其他">其他</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>年龄段</label>
+            <select id="pf-age">
+              <option value="">不确定</option>
+              <option value="学生（中学）">学生（中学）</option>
+              <option value="大学生">大学生</option>
+              <option value="20代前半">20代前半</option>
+              <option value="20代后半">20代后半</option>
+              <option value="30代">30代</option>
+              <option value="40代">40代</option>
+              <option value="50+">50+</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <label>性格特征（多选）</label>
+            <div id="pf-personality" class="chip-group">
+              <button class="pf-chip" data-v="内向">内向</button>
+              <button class="pf-chip" data-v="外向">外向</button>
+              <button class="pf-chip" data-v="敏感">敏感</button>
+              <button class="pf-chip" data-v="强势">强势</button>
+              <button class="pf-chip" data-v="回避型">回避型</button>
+              <button class="pf-chip" data-v="焦虑型">焦虑型</button>
+              <button class="pf-chip" data-v="讨好型">讨好型</button>
+              <button class="pf-chip" data-v="理性">理性</button>
+              <button class="pf-chip" data-v="情绪化">情绪化</button>
+              <button class="pf-chip" data-v="冷淡">冷淡</button>
+              <button class="pf-chip" data-v="热情">热情</button>
+              <button class="pf-chip" data-v="拧巴">拧巴</button>
+            </div>
+          </div>
+          <div class="form-row">
+            <label>背景信息（可选）</label>
+            <textarea id="pf-background" rows="2" placeholder="如：认识了3年、异地、最近冷战、TA刚分手…" maxlength="200"></textarea>
+          </div>
+          <div class="form-row">
+            <label>你对TA的想法（可选）</label>
+            <textarea id="pf-myThoughts" rows="2" placeholder="如：我喜欢TA但不确定TA的态度、我想分手但不敢说…" maxlength="200"></textarea>
+          </div>
+          <div class="form-row">
+            <label>你猜TA对你的想法（可选）</label>
+            <textarea id="pf-theirThoughts" rows="2" placeholder="如：感觉TA在疏远我、TA好像还喜欢我…" maxlength="200"></textarea>
+          </div>
+          <div class="form-row">
+            <label>历史互动与反馈（可选）</label>
+            <textarea id="pf-history" rows="2" placeholder="如：上次吵架后TA冷了我3天、之前说这种话TA都会…" maxlength="300"></textarea>
+          </div>
+          <button id="btn-save-profile" class="btn-action btn-primary" style="width:100%;margin-top:8px;">
+            保存档案
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== Toast ===== -->
+    <div id="toast" class="toast hidden"></div>
+
+  </div>
+
+  <script src="pixelcat.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
