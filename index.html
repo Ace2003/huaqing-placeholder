@@ -22,15 +22,18 @@
           <span class="brand-sub">中文潜台词解码器</span>
         </div>
       </div>
-      <div id="stats">
-        <div class="stat-item">
-          <span class="stat-num" id="stat-insight">0</span>
-          <span class="stat-label">洞察</span>
+      <div id="topbar-right">
+        <div id="stats">
+          <div class="stat-item">
+            <span class="stat-num" id="stat-insight">0</span>
+            <span class="stat-label">洞察</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-num" id="stat-streak">0</span>
+            <span class="stat-label">连击</span>
+          </div>
         </div>
-        <div class="stat-item">
-          <span class="stat-num" id="stat-streak">0</span>
-          <span class="stat-label">连击</span>
-        </div>
+        <button id="btn-music" class="icon-btn" title="背景音乐">🔇</button>
       </div>
     </header>
 
@@ -56,8 +59,24 @@
           </button>
         </div>
 
+        <!-- 独立图片上传区 -->
+        <div id="image-upload-section">
+          <input type="file" id="image-input" accept="image/*" style="display:none;">
+          <button id="btn-upload-image" class="btn-upload" title="上传聊天截图">
+            <span>📷</span> 上传截图识别文字
+          </button>
+          <div id="image-preview" class="hidden">
+            <img id="preview-img" src="" alt="预览">
+            <button id="btn-remove-image" class="btn-remove">✕</button>
+          </div>
+          <div id="image-status" class="hidden">
+            <span class="thinking-dots"><span></span><span></span><span></span></span>
+            <span id="image-status-text">正在识别文字…</span>
+          </div>
+        </div>
+
         <div id="input-box">
-          <textarea id="msg-input" placeholder="粘贴TA发来的消息，或者你想发的消息…&#10;例：「随便吧」「嗯」「在吗」" rows="3"></textarea>
+          <textarea id="msg-input" placeholder="粘贴TA发来的消息，或整段聊天记录…&#10;单条例：「随便吧」「嗯」「在吗」&#10;整段例：每行一条，用 我： / TA： 开头&#10;猫猫会自动判断是单条消息还是关系动态分析" rows="4"></textarea>
           <button id="btn-decode" class="btn-decode">
             <span>让猫猫解码</span>
             <span class="btn-arrow">→</span>
@@ -65,19 +84,20 @@
         </div>
 
         <div id="examples">
-          <span class="examples-label">试试这些：</span>
+          <span class="examples-label">单条试试：</span>
           <button class="example-chip" data-text="随便吧">「随便吧」</button>
           <button class="example-chip" data-text="嗯">「嗯」</button>
           <button class="example-chip" data-text="在吗">「在吗」</button>
-          <button class="example-chip" data-text="随便你">「随便你」</button>
           <button class="example-chip" data-text="我没事">「我没事」</button>
-          <button class="example-chip" data-text="你看着办">「你看着办」</button>
+          <span class="examples-label" style="margin-left:8px">整段：</span>
+          <button class="example-chip" data-text="我：在吗&#10;TA：嗯&#10;我：晚上一起吃饭？&#10;TA：随便吧&#10;我：那吃火锅？&#10;TA：你看着办">「聊天记录」</button>
         </div>
       </section>
 
       <!-- 结果区（解码后显示） -->
       <section id="result-section" class="hidden">
         <div id="result-card">
+          <button id="btn-close-result" class="btn-close-card" title="关闭">✕</button>
           <div id="result-header">
             <span id="result-emotion-badge"></span>
             <span id="result-danger-badge"></span>
@@ -268,12 +288,78 @@
       </div>
     </div>
 
+    <!-- ===== 首次引导 ===== -->
+    <div id="onboarding" class="modal hidden">
+      <div id="onboarding-box">
+        <div id="ob-cat">🐱</div>
+        <h2 id="ob-title">猫的第六感</h2>
+        <p id="ob-sub">粘贴一条消息，我帮你读懂对方没说出口的部分</p>
+        <div id="ob-demo">
+          <div class="ob-demo-msg">TA说：「我没事」</div>
+          <div class="ob-demo-arrow">↓</div>
+          <div class="ob-demo-result">
+            <div class="ob-result-row"><span class="ob-tag ob-red">⚠ 委屈</span></div>
+            <div class="ob-result-row ob-real">TA真实情绪：有事但在压着不说，这句话本身就是求救信号</div>
+            <div class="ob-result-row ob-sub">潜台词：「我有事但说了也没用，我等你发现」</div>
+            <div class="ob-result-row ob-reply">建议：你不用骗我，我在这里，想说的时候随时说</div>
+          </div>
+        </div>
+        <button id="ob-start" class="btn-decode" style="width:100%;">
+          <span>试试看</span>
+          <span class="btn-arrow">→</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- ===== 批量关系分析结果 ===== -->
+    <div id="batch-result" class="hidden" style="width:100%;margin-top:32px;">
+      <div id="result-card" style="max-width:none;">
+        <button id="btn-close-batch" class="btn-close-card" title="关闭">✕</button>
+        <div id="result-header">
+          <span class="badge badge-yellow">关系动态分析</span>
+        </div>
+        <div class="result-row" id="batch-dynamic-row">
+          <div class="result-label">▸ 权力动态</div>
+          <div class="result-val" id="batch-dynamic"></div>
+        </div>
+        <div class="result-row">
+          <div class="result-label">▸ TA的隐藏状态</div>
+          <div class="result-val" id="batch-their-state"></div>
+        </div>
+        <div class="result-row">
+          <div class="result-label">▸ 你的隐藏状态</div>
+          <div class="result-val" id="batch-your-state"></div>
+        </div>
+        <div class="result-row">
+          <div class="result-label">▸ 沟通死结</div>
+          <div class="result-val result-highlight" id="batch-deadlock"></div>
+        </div>
+        <div class="result-row">
+          <div class="result-label">▸ 关系健康度</div>
+          <div class="result-val" id="batch-health"></div>
+        </div>
+        <div class="result-reply">
+          <div class="result-label">✦ 猫猫的建议</div>
+          <div id="batch-advice"></div>
+        </div>
+        <div id="result-cat-whisper">
+          <span class="whisper-icon">🐱</span>
+          <span id="batch-whisper"></span>
+        </div>
+        <div id="result-actions">
+          <button id="btn-share-batch" class="btn-action"><span>📸</span> 生成分享图</button>
+          <button id="btn-batch-again" class="btn-action btn-primary"><span>再分析一段</span></button>
+        </div>
+      </div>
+    </div>
+
     <!-- ===== Toast ===== -->
     <div id="toast" class="toast hidden"></div>
 
   </div>
 
-  <script src="pixelcat.js"></script>
+  <script src="videocat.js"></script>
+  <script src="audio.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

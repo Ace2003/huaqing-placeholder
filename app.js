@@ -8,7 +8,7 @@
   const SAVE_KEY = 'cat6_data';
 
   // ========== 存档 ==========
-  let data = { insight: 0, streak: 0, lastDate: '', history: [], profiles: [], selectedProfileId: null, catLevel: 1, catName: '蓝喵' };
+  let data = { insight: 0, streak: 0, lastDate: '', history: [], profiles: [], selectedProfileId: null };
   function loadData() {
     try {
       const raw = localStorage.getItem(SAVE_KEY);
@@ -28,8 +28,10 @@
   // ========== 猫猫 ==========
   let cat = null;
   function initCat() {
-    cat = new PixelCat($('cat-canvas'), { onStateChange(){}, level: data.catLevel || 1 });
+    cat = new VideoCat($('cat-canvas'), { onStateChange(){} });
     cat.start();
+    window.cat = cat;       // 暴露到全局方便控制台调试
+    window.catData = data;  // 暴露数据
   }
 
   // ========== 统计更新 ==========
@@ -38,28 +40,54 @@
     $('stat-streak').textContent = data.streak;
   }
 
-  // ========== 解码 ==========
+  // ========== 解码（自动判断单条 / 整段对话）==========
+  function detectBatch(text) {
+    if (!text) return false;
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length > 2) return true;
+    // 含 我： / TA： / 对方： / A： / B： 等对话前缀，视为整段
+    if (/^(我|TA|对方|A|B|ta|我方|对方|甲方|乙方)[：:]/m.test(text)) return true;
+    return false;
+  }
+
   async function decode() {
     const input = $('msg-input');
     const text = input.value.trim();
     if (!text) { toast('先粘贴一条消息吧'); return; }
+
+    const isBatch = detectBatch(text);
 
     const btn = $('btn-decode');
     btn.disabled = true;
     btn.innerHTML = '<span class="thinking-dots"><span></span><span></span><span></span></span> 猫猫在读…';
     $('cat-stage').classList.add('thinking');
     if (cat) cat.setState('charging');
+    if (window.CatAudio) thinkingSound = CatAudio.playThinking();
 
     try {
-      const profile = getSelectedProfile();
-      const res = await fetch('/api/decode', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text, profile })
-      });
-      const result = await res.json();
-      showResult(text, result);
-      recordDecode(text, result);
+      let result;
+      if (isBatch) {
+        const res = await fetch('/api/decode_batch', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text })
+        });
+        result = await res.json();
+        if (window.CatAudio) { if (thinkingSound) CatAudio.stopThinking(thinkingSound); CatAudio.playReveal(); }
+        lastBatchResult = { original: text, ...result };
+        showBatchResult(result);
+        recordBatchDecode(text, result);
+      } else {
+        const profile = getSelectedProfile();
+        const res = await fetch('/api/decode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text, profile })
+        });
+        result = await res.json();
+        if (window.CatAudio) { if (thinkingSound) CatAudio.stopThinking(thinkingSound); CatAudio.playReveal(); }
+        showResult(text, result);
+        recordDecode(text, result);
+      }
     } catch (e) {
       toast('网络抖了一下，再试一次');
     } finally {
@@ -104,13 +132,6 @@
 
   function recordDecode(original, r) {
     data.insight++;
-    // 猫猫成长：每 5 次洞察升一级
-    const newLevel = Math.min(99, 1 + Math.floor(data.insight / 5));
-    if (newLevel > data.catLevel) {
-      data.catLevel = newLevel;
-      if (cat) cat.level = newLevel;
-      setTimeout(() => toast('🎉 猫猫升级了！Lv.' + newLevel), 1500);
-    }
     const today = new Date().toDateString();
     if (data.lastDate === today) {
       // 同一天不重复加连击
@@ -121,6 +142,7 @@
     }
     data.lastDate = today;
     data.history.unshift({
+      type: 'single',
       msg: original,
       real: r.real_emotion,
       emotion: r.emotion_tag,
@@ -134,11 +156,46 @@
     renderHistory();
   }
 
-  let lastResult = null;
+  function recordBatchDecode(original, r) {
+    data.insight++;
+    const today = new Date().toDateString();
+    if (data.lastDate === today) {
+      // 同一天不重复加连击
+    } else if (data.lastDate === new Date(Date.now() - 86400000).toDateString()) {
+      data.streak++;
+    } else {
+      data.streak = 1;
+    }
+    data.lastDate = today;
+    data.history.unshift({
+      type: 'batch',
+      msg: original,
+      real: r.deadlock || r.power_dynamic,
+      reply: r.advice,
+      time: Date.now(),
+      full: r,
+    });
+    data.history = data.history.slice(0, 50);
+    saveData();
+    updateStats();
+    renderHistory();
+  }
 
-  // ========== 再来一条 ==========
+  let lastResult = null;
+  let lastBatchResult = null;
+
+  // ========== 关闭结果（返回输入界面，不重置 textarea） ==========
+  function closeResult() {
+    $('result-section').classList.add('hidden');
+    $('batch-result').classList.add('hidden');
+    $('input-section').classList.remove('hidden');
+    $('msg-input').focus();
+  }
+
+  // ========== 再来一条（清空 textarea） ==========
   function decodeAgain() {
     $('result-section').classList.add('hidden');
+    $('batch-result').classList.add('hidden');
     $('input-section').classList.remove('hidden');
     $('msg-input').value = '';
     $('msg-input').focus();
@@ -262,6 +319,120 @@
     shareImageDataUrl = c.toDataURL('image/png');
   }
 
+  // 整段对话的分享图
+  function generateBatchShareImage() {
+    const r = lastBatchResult;
+    if (!r) { toast('还没有可分享的结果'); return; }
+    const W = 720, H = 1180;
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const cx = c.getContext('2d');
+
+    // 背景
+    const grad = cx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, '#0f1320');
+    grad.addColorStop(1, '#0a0a14');
+    cx.fillStyle = grad;
+    cx.fillRect(0, 0, W, H);
+
+    // 顶部氛围光
+    const halo = cx.createRadialGradient(W/2, 180, 0, W/2, 180, 420);
+    halo.addColorStop(0, 'rgba(109,213,237,0.12)');
+    halo.addColorStop(1, 'transparent');
+    cx.fillStyle = halo;
+    cx.fillRect(0, 0, W, H);
+
+    // 品牌头
+    cx.fillStyle = '#6dd5ed';
+    cx.font = 'bold 26px "Noto Sans SC", sans-serif';
+    cx.textAlign = 'center';
+    cx.fillText('🐱 猫的第六感', W/2, 70);
+    cx.fillStyle = '#6a6a85';
+    cx.font = '13px "Noto Sans SC", sans-serif';
+    cx.fillText('关系动态分析', W/2, 95);
+
+    // 原始对话
+    let y = 140;
+    cx.fillStyle = '#c4bca8';
+    cx.font = '12px "Noto Sans SC", sans-serif';
+    cx.textAlign = 'left';
+    cx.fillText('聊天记录', 60, y);
+    y += 22;
+    cx.fillStyle = '#1a1a2e';
+    roundRect(cx, 50, y - 14, W - 100, 92, 10); cx.fill();
+    cx.fillStyle = '#a8b3c4';
+    cx.font = '13px "Noto Sans SC", sans-serif';
+    const dialogPreview = (r.original || '').split('\n').slice(0, 4).join('\n');
+    const more = (r.original || '').split('\n').length > 4 ? '\n…' : '';
+    wrapText(cx, dialogPreview + more, 68, y + 8, W - 136, 20);
+    y += 104;
+
+    // 权力动态
+    cx.fillStyle = '#6dd5ed';
+    cx.font = 'bold 12px "Noto Sans SC", sans-serif';
+    cx.fillText('▸ 权力动态', 60, y); y += 22;
+    cx.fillStyle = '#fef6e4';
+    cx.font = '15px "Noto Sans SC", sans-serif';
+    const dynH = wrapText(cx, r.power_dynamic || '', 60, y, W - 120, 22);
+    y += dynH + 14;
+
+    // TA 的隐藏状态
+    cx.fillStyle = '#ff9eb5';
+    cx.font = 'bold 12px "Noto Sans SC", sans-serif';
+    cx.fillText('▸ TA的隐藏状态', 60, y); y += 22;
+    cx.fillStyle = '#fef6e4';
+    cx.font = '15px "Noto Sans SC", sans-serif';
+    const theirH = wrapText(cx, r.their_hidden_state || '', 60, y, W - 120, 22);
+    y += theirH + 14;
+
+    // 沟通死结（重点）
+    cx.fillStyle = '#ff7ea3';
+    cx.font = 'bold 12px "Noto Sans SC", sans-serif';
+    cx.fillText('▸ 沟通死结', 60, y); y += 22;
+    cx.fillStyle = '#1a1a2e';
+    roundRect(cx, 50, y - 12, W - 100, 0, 8);
+    cx.fillStyle = '#ff7ea3';
+    cx.font = 'italic 16px "Noto Sans SC", sans-serif';
+    const dlH = wrapText(cx, r.deadlock || '', 60, y + 8, W - 120, 24);
+    y += dlH + 16;
+
+    // 猫猫的建议
+    cx.fillStyle = '#7ee893';
+    cx.font = 'bold 12px "Noto Sans SC", sans-serif';
+    cx.fillText('✦ 猫猫的建议', 60, y); y += 24;
+    const adviceGrad = cx.createLinearGradient(50, y, W - 50, y);
+    adviceGrad.addColorStop(0, 'rgba(126,232,147,0.10)');
+    adviceGrad.addColorStop(1, 'rgba(109,213,237,0.08)');
+    cx.fillStyle = adviceGrad;
+    roundRect(cx, 50, y - 12, W - 100, 68, 10); cx.fill();
+    cx.strokeStyle = 'rgba(126,232,147,0.2)';
+    cx.lineWidth = 1;
+    roundRect(cx, 50, y - 12, W - 100, 68, 10); cx.stroke();
+    cx.fillStyle = '#fef6e4';
+    cx.font = 'bold 15px "Noto Sans SC", sans-serif';
+    wrapText(cx, r.advice || '', 68, y + 14, W - 136, 22);
+
+    // 底部猫猫话
+    y = H - 110;
+    cx.fillStyle = '#6dd5ed';
+    cx.font = '13px "Noto Sans SC", sans-serif';
+    cx.textAlign = 'center';
+    cx.fillText('🐱 ' + (r.cat_whisper || ''), W/2, y);
+
+    cx.fillStyle = '#6a6a85';
+    cx.font = '11px "Noto Sans SC", sans-serif';
+    cx.fillText('猫的第六感 · 关系动态分析', W/2, H - 36);
+
+    // 显示
+    const shareCanvas = $('share-canvas');
+    shareCanvas.width = W; shareCanvas.height = H;
+    shareCanvas.style.aspectRatio = W + '/' + H;
+    const sctx = shareCanvas.getContext('2d');
+    sctx.drawImage(c, 0, 0);
+    $('share-modal').classList.remove('hidden');
+    shareImageDataUrl = c.toDataURL('image/png');
+  }
+
   let shareImageDataUrl = null;
 
   function roundRect(cx, x, y, w, h, r) {
@@ -302,20 +473,35 @@
       return;
     }
     empty.classList.add('hidden');
-    list.innerHTML = data.history.map((h, i) => `
-      <div class="history-item" data-idx="${i}">
-        <div class="history-msg">${escapeHtml(h.msg)}</div>
+    list.innerHTML = data.history.map((h, i) => {
+      const isBatch = h.type === 'batch';
+      const badge = isBatch ? '<span class="hist-badge">关系</span>' : '';
+      const firstLine = (h.msg || '').split('\n').filter(l => l.trim())[0] || '';
+      const preview = isBatch ? firstLine + (h.msg.split('\n').length > 1 ? ' ...' : '') : (h.msg || '');
+      return `
+      <div class="history-item ${isBatch ? 'history-batch' : ''}" data-idx="${i}">
+        <div class="history-msg">${badge}${escapeHtml(preview)}</div>
         <div class="history-real">${escapeHtml(h.real || '')}</div>
         <div class="history-time">${timeAgo(h.time)}</div>
       </div>
-    `).join('');
+    `;
+    }).join('');
     list.querySelectorAll('.history-item').forEach(el => {
       el.addEventListener('click', () => {
         const idx = +el.dataset.idx;
         const h = data.history[idx];
-        if (h) {
+        if (!h) return;
+        $('history-drawer').classList.add('hidden');
+        if (h.type === 'batch') {
+          $('input-section').classList.add('hidden');
+          $('result-section').classList.add('hidden');
+          $('batch-result').classList.remove('hidden');
+          showBatchResult(h.full || {});
+        } else {
+          $('input-section').classList.add('hidden');
+          $('batch-result').classList.add('hidden');
+          $('result-section').classList.remove('hidden');
           showResult(h.msg, h.full || {});
-          $('history-drawer').classList.add('hidden');
         }
       });
     });
@@ -357,6 +543,10 @@
     $('btn-again').addEventListener('click', decodeAgain);
     $('btn-copy-reply').addEventListener('click', copyReply);
     $('btn-share').addEventListener('click', generateShareImage);
+
+    $('btn-close-result').addEventListener('click', closeResult);
+    $('btn-close-batch').addEventListener('click', closeResult);
+    $('btn-share-batch').addEventListener('click', generateBatchShareImage);
 
     $('btn-history').addEventListener('click', () => $('history-drawer').classList.remove('hidden'));
     $('btn-close-history').addEventListener('click', () => $('history-drawer').classList.add('hidden'));
@@ -518,6 +708,172 @@
     });
   }
 
+  // ========== 图片上传 ==========
+  let currentImageData = null;
+
+  function bindImageUpload() {
+    const fileInput = $('image-input');
+    const btnUpload = $('btn-upload-image');
+    const preview = $('image-preview');
+    const previewImg = $('preview-img');
+    const btnRemove = $('btn-remove-image');
+    const status = $('image-status');
+    const statusText = $('image-status-text');
+    const uploadSection = $('image-upload-section');
+
+    btnUpload.addEventListener('click', () => fileInput.click());
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      processImageFile(file);
+    });
+
+    // 拖拽上传到整个上传区域
+    uploadSection.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      uploadSection.style.borderColor = 'var(--accent)';
+      uploadSection.style.background = 'rgba(255,217,102,0.1)';
+    });
+    uploadSection.addEventListener('dragleave', () => {
+      uploadSection.style.borderColor = '';
+      uploadSection.style.background = '';
+    });
+    uploadSection.addEventListener('drop', (e) => {
+      e.preventDefault();
+      uploadSection.style.borderColor = '';
+      uploadSection.style.background = '';
+      const file = e.dataTransfer.files[0];
+      if (file && file.type.startsWith('image/')) {
+        processImageFile(file);
+      }
+    });
+
+    btnRemove.addEventListener('click', () => {
+      currentImageData = null;
+      preview.classList.add('hidden');
+      status.classList.add('hidden');
+      fileInput.value = '';
+      previewImg.src = '';
+    });
+
+    function processImageFile(file) {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const dataUrl = e.target.result;
+        const base64 = dataUrl.split(',')[1];
+        currentImageData = base64;
+        previewImg.src = dataUrl;
+        preview.classList.remove('hidden');
+        status.classList.remove('hidden');
+        statusText.textContent = '正在识别文字…';
+        parseImage(base64, file.type || '');
+      };
+      reader.readAsDataURL(file);
+    }
+
+    async function parseImage(base64, mime) {
+      try {
+        const res = await fetch('/api/parse_image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ image: base64, mime })
+        });
+        const result = await res.json();
+        if (result.error) {
+          statusText.textContent = '识别失败：' + (result.details || result.error);
+          toast('图片识别失败，请手动输入');
+          return;
+        }
+        const text = result.text || '';
+        // 统一写入主输入框，由 decode 时自动判断单条 / 整段
+        $('msg-input').value = text;
+        $('msg-input').focus();
+        statusText.textContent = '识别完成 ✓';
+        toast('图片文字已提取');
+      } catch (e) {
+        statusText.textContent = '识别失败，请手动输入';
+        toast('网络抖了一下，再试一次');
+      }
+    }
+  }
+
+  // ========== 音频 ==========
+  let thinkingSound = null;
+
+  function bindBatchEvents() {
+    $('btn-batch-again').addEventListener('click', decodeAgain);
+  }
+  function bindAudio() {
+    const btn = $('btn-music');
+    // 首次点击任意位置开启音频上下文
+    const firstClick = () => {
+      if (window.CatAudio) CatAudio.init();
+      document.removeEventListener('click', firstClick);
+    };
+    document.addEventListener('click', firstClick);
+
+    btn.addEventListener('click', () => {
+      if (!window.CatAudio) return;
+      CatAudio.init();
+      if (CatAudio.isMusicPlaying()) {
+        CatAudio.stopMusic();
+        btn.textContent = '🔇';
+        btn.classList.remove('active');
+      } else {
+        CatAudio.startMusic();
+        btn.textContent = '🔊';
+        btn.classList.add('active');
+      }
+    });
+  }
+
+  // ========== 模式切换（已合并入单一输入框，保留空函数兼容 init）==========
+  function bindModeTabs() {}
+
+  // ========== 批量解码（已合并入 decode，保留空实现避免引用错误）==========
+  async function decodeBatch() {}
+
+  function showBatchResult(r) {
+    $('input-section').classList.add('hidden');
+    $('result-section').classList.add('hidden');
+    $('batch-result').classList.remove('hidden');
+
+    const healthMap = { green:'💚 健康', yellow:'⚠️ 需注意', red:'🔴 危险' };
+    $('batch-dynamic').textContent = r.power_dynamic || '';
+    $('batch-their-state').textContent = r.their_hidden_state || '';
+    $('batch-your-state').textContent = r.your_hidden_state || '';
+    $('batch-deadlock').textContent = r.deadlock || '';
+    $('batch-health').textContent = (healthMap[r.health_level] || '') + ' ' + (r.health_detail || '');
+    $('batch-advice').textContent = r.advice || '';
+    $('batch-whisper').textContent = r.cat_whisper || '';
+
+    lastBatchResult = { ...(lastBatchResult || {}), ...r };
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  // ========== 首次引导 ==========
+  function showOnboarding() {
+    if (localStorage.getItem('cat6_onboarded')) return;
+    setTimeout(() => {
+      $('onboarding').classList.remove('hidden');
+    }, 800);
+  }
+
+  function bindOnboarding() {
+    $('ob-start').addEventListener('click', () => {
+      $('onboarding').classList.add('hidden');
+      localStorage.setItem('cat6_onboarded', '1');
+      // 自动开启音乐
+      if (window.CatAudio) {
+        CatAudio.init();
+        CatAudio.startMusic();
+        $('btn-music').textContent = '🔊';
+        $('btn-music').classList.add('active');
+      }
+    });
+  }
+
   // ========== 初始化 ==========
   function init() {
     loadData();
@@ -526,8 +882,14 @@
     renderHistory();
     bindEvents();
     bindProfileEvents();
+    bindAudio();
+    bindModeTabs();
+    bindOnboarding();
+    bindBatchEvents();
+    bindImageUpload();
     renderProfileSelector();
     renderProfileList();
+    showOnboarding();
   }
 
   if (document.readyState === 'loading') {

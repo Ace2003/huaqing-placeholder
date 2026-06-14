@@ -8,3 +8,5 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: STEPFUN_KEY
+        sync: false  # 在 Render 后台 Environment 面板填真实值
