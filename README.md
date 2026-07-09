@@ -29,9 +29,7 @@
 - **前端**：原生 HTML / CSS / JavaScript（零构建、零依赖）
 - **后端**：Python 标准库 `http.server`（零依赖、零框架）
 - **音频**：Web Audio API 实时合成（白噪声 + 棕噪声 + 粉噪声 + 工频蜂鸣 + 硬盘读写模拟）
-- **AI 接口**：
-  - 文字解码：智谱 GLM-4.5-air（双 endpoint 容错：coding + general）
-  - 图片识别：StepFun `step-3.7-flash`（视觉模型）
+- **AI 接口**：StepFun `step-3.7-flash`（多模态，文字解码 + 聊天截图 OCR 共用同一模型）
 - **素材**：Canvas 像素猫动画 + `<video>` 切片
 
 ## 🚀 本地运行
@@ -60,7 +58,7 @@ push 到 `main` 分支会自动触发 Render 重新构建并部署。
 
 | 变量 | 值 | 用途 |
 |---|---|---|
-| `STEPFUN_KEY` | 你的 stepfun API key（去 [platform.stepfun.com](https://platform.stepfun.com) 申请） | 图片识别必需，不配则截图识别功能不可用 |
+| `STEPFUN_KEY` | 你的 stepfun API key（去 [platform.stepfun.com](https://platform.stepfun.com) 申请） | **必需**。文字解码和图片识别都依赖它，不配则所有 AI 功能走兜底预录 |
 
 本地开发时设环境变量：
 ```bash
@@ -94,7 +92,7 @@ pixelpet/
 | `POST /api/decode` | `{ text, profile }` | `{ surface_meaning, real_emotion, what_they_want, subtext, context_clue, danger_level, suggested_reply, cat_whisper, emotion_tag }` |
 | `POST /api/decode_batch` | `{ text }` | `{ power_dynamic, their_hidden_state, your_hidden_state, deadlock, health_level, health_detail, advice, cat_whisper }` |
 | `POST /api/parse_image` | `{ image, mime }` | `{ text }` |
-| `GET /api/status` | — | `{ model, keys }` |
+| `GET /api/status` | — | `{ model, provider, key_configured }` |
 | `GET /api/demos` | — | `{ demos }` |
 
 所有出参 JSON 直出，无 Markdown 包裹。`decode` / `decode_batch` 在网络失败时有本地兜底数据。

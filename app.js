@@ -76,6 +76,7 @@
         lastBatchResult = { original: text, ...result };
         showBatchResult(result);
         recordBatchDecode(text, result);
+        if (result.degraded) toast('AI 服务暂时失灵，显示的是兜底预录');
       } else {
         const profile = getSelectedProfile();
         const res = await fetch('/api/decode', {
@@ -87,6 +88,7 @@
         if (window.CatAudio) { if (thinkingSound) CatAudio.stopThinking(thinkingSound); CatAudio.playReveal(); }
         showResult(text, result);
         recordDecode(text, result);
+        if (result.degraded) toast('AI 服务暂时失灵，显示的是兜底预录');
       }
     } catch (e) {
       toast('网络抖了一下，再试一次');
@@ -708,15 +710,42 @@
     });
   }
 
-  // ========== 图片上传 ==========
-  let currentImageData = null;
+  // ========== 图片上传（多图 + 压缩） ==========
+  let imageQueue = []; // { id, dataUrl, base64, mime, status: 'processing'|'ok'|'failed', text }
+  let imgIdSeq = 0;
+
+  // 上传前压缩：最长边 1568px，JPEG 0.82。砍 payload 避免 Render 100s 超时。
+  function compressImage(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error('read failed'));
+      reader.onload = (e) => {
+        const img = new Image();
+        img.onerror = () => reject(new Error('decode failed'));
+        img.onload = () => {
+          const MAX = 1568;
+          let { width: w, height: h } = img;
+          if (Math.max(w, h) > MAX) {
+            const k = MAX / Math.max(w, h);
+            w = Math.round(w * k); h = Math.round(h * k);
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          const cx = canvas.getContext('2d');
+          cx.drawImage(img, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+          resolve({ dataUrl, base64: dataUrl.split(',')[1], mime: 'image/jpeg' });
+        };
+        img.src = e.target.result;
+      };
+      reader.readAsDataURL(file);
+    });
+  }
 
   function bindImageUpload() {
     const fileInput = $('image-input');
     const btnUpload = $('btn-upload-image');
     const preview = $('image-preview');
-    const previewImg = $('preview-img');
-    const btnRemove = $('btn-remove-image');
     const status = $('image-status');
     const statusText = $('image-status-text');
     const uploadSection = $('image-upload-section');
@@ -724,12 +753,11 @@
     btnUpload.addEventListener('click', () => fileInput.click());
 
     fileInput.addEventListener('change', (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      processImageFile(file);
+      const files = Array.from(e.target.files || []);
+      if (files.length) files.forEach(addImageFile);
+      fileInput.value = ''; // 允许再次选同样的文件
     });
 
-    // 拖拽上传到整个上传区域
     uploadSection.addEventListener('dragover', (e) => {
       e.preventDefault();
       uploadSection.style.borderColor = 'var(--accent)';
@@ -743,57 +771,108 @@
       e.preventDefault();
       uploadSection.style.borderColor = '';
       uploadSection.style.background = '';
-      const file = e.dataTransfer.files[0];
-      if (file && file.type.startsWith('image/')) {
-        processImageFile(file);
+      const files = Array.from(e.dataTransfer.files || []).filter(f => f.type.startsWith('image/'));
+      if (files.length) files.forEach(addImageFile);
+    });
+
+    // 缩略图列表点 × 删除单张
+    preview.addEventListener('click', (e) => {
+      const btn = e.target.closest('.btn-remove');
+      if (!btn) return;
+      const id = +btn.dataset.id;
+      imageQueue = imageQueue.filter(it => it.id !== id);
+      renderImagePreview();
+      flushToTextarea();
+    });
+
+    async function addImageFile(file) {
+      const id = ++imgIdSeq;
+      let item;
+      try {
+        const { dataUrl, base64, mime } = await compressImage(file);
+        item = { id, dataUrl, base64, mime, status: 'processing', text: '' };
+        imageQueue.push(item);
+      } catch (e) {
+        // 压缩失败也保留位置，但标记失败
+        item = { id, dataUrl: '', base64: '', mime: '', status: 'failed', text: '' };
+        imageQueue.push(item);
+        renderImagePreview();
+        updateStatus();
+        return;
       }
-    });
-
-    btnRemove.addEventListener('click', () => {
-      currentImageData = null;
-      preview.classList.add('hidden');
-      status.classList.add('hidden');
-      fileInput.value = '';
-      previewImg.src = '';
-    });
-
-    function processImageFile(file) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const dataUrl = e.target.result;
-        const base64 = dataUrl.split(',')[1];
-        currentImageData = base64;
-        previewImg.src = dataUrl;
-        preview.classList.remove('hidden');
-        status.classList.remove('hidden');
-        statusText.textContent = '正在识别文字…';
-        parseImage(base64, file.type || '');
-      };
-      reader.readAsDataURL(file);
-    }
-
-    async function parseImage(base64, mime) {
+      renderImagePreview();
+      updateStatus();
+      // 后端调用 — 单张独立
       try {
         const res = await fetch('/api/parse_image', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ image: base64, mime })
+          body: JSON.stringify({ image: item.base64, mime: item.mime })
         });
         const result = await res.json();
-        if (result.error) {
-          statusText.textContent = '识别失败：' + (result.details || result.error);
-          toast('图片识别失败，请手动输入');
-          return;
+        if (result.error || !result.text) {
+          item.status = 'failed';
+          item.text = '';
+        } else {
+          item.status = 'ok';
+          item.text = result.text.trim();
         }
-        const text = result.text || '';
-        // 统一写入主输入框，由 decode 时自动判断单条 / 整段
-        $('msg-input').value = text;
-        $('msg-input').focus();
-        statusText.textContent = '识别完成 ✓';
-        toast('图片文字已提取');
       } catch (e) {
-        statusText.textContent = '识别失败，请手动输入';
-        toast('网络抖了一下，再试一次');
+        item.status = 'failed';
+      }
+      renderImagePreview();
+      updateStatus();
+      flushToTextarea();
+    }
+
+    function renderImagePreview() {
+      if (!imageQueue.length) {
+        preview.classList.add('hidden');
+        preview.innerHTML = '';
+        return;
+      }
+      preview.classList.remove('hidden');
+      // 按 imageQueue 顺序展示
+      preview.innerHTML = imageQueue.map((it, i) => {
+        const cls = it.status === 'processing' ? 'processing' : (it.status === 'failed' ? 'failed' : '');
+        const src = it.dataUrl || '';
+        return `
+          <div class="img-thumb ${cls}">
+            <img src="${src}" alt="图${i + 1}">
+            <span class="img-thumb-order">${i + 1}</span>
+            <button class="btn-remove" data-id="${it.id}" title="移除">✕</button>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function updateStatus() {
+      const total = imageQueue.length;
+      if (!total) { status.classList.add('hidden'); return; }
+      const ok = imageQueue.filter(it => it.status === 'ok').length;
+      const failed = imageQueue.filter(it => it.status === 'failed').length;
+      const processing = imageQueue.filter(it => it.status === 'processing').length;
+      status.classList.remove('hidden');
+      if (processing > 0) {
+        statusText.textContent = `识别中… ${ok}/${total}`;
+      } else if (failed > 0) {
+        statusText.textContent = `识别完成 ${ok}/${total}（${failed} 张失败，可点击 ✕ 移除重试）`;
+      } else {
+        statusText.textContent = `识别完成 ✓ ${total} 张`;
+      }
+    }
+
+    function flushToTextarea() {
+      const okItems = imageQueue.filter(it => it.status === 'ok' && it.text);
+      if (!okItems.length) return;
+      // 多张按顺序拼接，每张之间空一行
+      const text = okItems.map(it => it.text).join('\n');
+      $('msg-input').value = text;
+      $('msg-input').focus();
+      if (okItems.length > 1) {
+        toast(`已合并 ${okItems.length} 张截图`);
+      } else {
+        toast('图片文字已提取');
       }
     }
   }

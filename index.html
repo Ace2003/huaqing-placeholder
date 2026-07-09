@@ -61,14 +61,11 @@
 
         <!-- 独立图片上传区 -->
         <div id="image-upload-section">
-          <input type="file" id="image-input" accept="image/*" style="display:none;">
-          <button id="btn-upload-image" class="btn-upload" title="上传聊天截图">
-            <span>📷</span> 上传截图识别文字
+          <input type="file" id="image-input" accept="image/*" multiple style="display:none;">
+          <button id="btn-upload-image" class="btn-upload" title="可多选 / 可拖拽多张">
+            <span>📷</span> 上传截图识别文字（可多选）
           </button>
-          <div id="image-preview" class="hidden">
-            <img id="preview-img" src="" alt="预览">
-            <button id="btn-remove-image" class="btn-remove">✕</button>
-          </div>
+          <div id="image-preview" class="hidden"></div>
           <div id="image-status" class="hidden">
             <span class="thinking-dots"><span></span><span></span><span></span></span>
             <span id="image-status-text">正在识别文字…</span>

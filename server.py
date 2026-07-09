@@ -1,6 +1,6 @@
 """
 猫的第六感 — 中文潜台词解码器
-静态文件 + 智谱 GLM 解码 API
+静态文件 + StepFun 多模态 LLM
 运行：python server.py    访问：http://localhost:8000
 """
 import http.server
@@ -10,26 +10,12 @@ import urllib.request
 import urllib.error
 import os
 import sys
-import time
-import threading
 import re
 
 PORT = int(os.environ.get('PORT', 8000))
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-API_KEYS = [
-    '86aece543dff48798823dd54fc966df9.Px9gdN9vyQZ2Wko2',
-    'a82b9549b8b7424cb174af70820ecf55.Mbaq71CKLy1yYanZ',
-]
-KEY_COOLDOWN = {}
-KEY_COOLDOWN_SECONDS = 5 * 3600 + 600
-KEY_LOCK = threading.Lock()
-
-CODING_URL = 'https://open.bigmodel.cn/api/coding/paas/v4/chat/completions'
-GENERAL_URL = 'https://open.bigmodel.cn/api/paas/v4/chat/completions'
-MODEL = 'glm-4.5-air'
-
-# StepFun API (用于图片识别) — key 从环境变量读取，避免泄露
+# StepFun API — key 从环境变量 STEPFUN_KEY 读取（Render 后台配置）
 STEPFUN_URL = 'https://api.stepfun.com/step_plan/v1/chat/completions'
 STEPFUN_KEY = os.environ.get('STEPFUN_KEY', '')
 STEPFUN_MODEL = 'step-3.7-flash'
@@ -126,80 +112,65 @@ BATCH_PROMPT = """你是「猫的第六感」的关系动态分析引擎。用�
 语气：侧写要狠，建议要暖。不用说教和废话。"""
 
 
-def _available_keys():
-    now = time.time()
-    with KEY_LOCK:
-        ready = [k for k in API_KEYS if KEY_COOLDOWN.get(k, 0) <= now]
-        return ready if ready else sorted(API_KEYS, key=lambda k: KEY_COOLDOWN.get(k, 0))
-
-
-def _cool_key(key, until_ts=None, reason=''):
-    if until_ts is None or until_ts <= time.time():
-        until_ts = time.time() + KEY_COOLDOWN_SECONDS
-    with KEY_LOCK:
-        KEY_COOLDOWN[key] = until_ts
-    sys.stderr.write(f'[key] {key[:8]}… cooled ({reason})\n')
-
-
-def _is_quota_error(http_code, body):
-    if http_code != 429:
-        return False
-    markers = ['1113', '1308', '余额', '额度', '5 小时', '5小时', '上限', '解除', 'quota', 'exceeded']
-    return any(m.lower() in (body or '').lower() for m in markers)
-
-
-def _parse_cooldown_until(body):
-    if not body:
-        return None
-    m = re.search(r'(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})', body)
-    if not m:
-        return None
-    try:
-        return time.mktime(time.strptime(m.group(1), '%Y-%m-%d %H:%M:%S')) + 60
-    except Exception:
-        return None
-
-
-def call_zhipu(user_text, endpoint, api_key, profile=None):
-    profile_block = ''
-    if profile and isinstance(profile, dict):
-        parts = []
-        labels = {
-            'name': '称呼', 'relation': '关系', 'age': '年龄段', 'personality': '性格特征',
-            'background': '背景信息', 'myThoughts': '你对TA的想法',
-            'theirThoughts': '你猜TA对你的想法', 'history': '历史互动与反馈',
-        }
-        for k, label in labels.items():
-            v = profile.get(k)
-            if v and str(v).strip():
-                parts.append(f'  {label}：{v}')
-        if parts:
-            profile_block = '\n\n【目标对象档案】\n' + '\n'.join(parts)
-
-    user_content = f'需要解码的消息：\n「{user_text}」{profile_block}'
-
+def _stepfun_chat(messages, temperature=0.85, max_tokens=2000, json_mode=False, timeout=60):
+    """统一 StepFun chat completions 调用。返回模型文本或抛异常。"""
+    if not STEPFUN_KEY:
+        raise RuntimeError('server missing STEPFUN_KEY env')
     payload = {
-        'model': MODEL,
-        'messages': [
-            {'role': 'system', 'content': SYSTEM_PROMPT},
-            {'role': 'user', 'content': user_content},
-        ],
-        'temperature': 0.85,
-        'max_tokens': 2000,
-        'response_format': {'type': 'json_object'},
+        'model': STEPFUN_MODEL,
+        'messages': messages,
+        'temperature': temperature,
+        'max_tokens': max_tokens,
     }
+    if json_mode:
+        payload['response_format'] = {'type': 'json_object'}
     req = urllib.request.Request(
-        endpoint,
+        STEPFUN_URL,
         data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {api_key}'},
+        headers={'Content-Type': 'application/json', 'Authorization': f'Bearer {STEPFUN_KEY}'},
         method='POST',
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(req, timeout=60) as resp:
+    with opener.open(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode('utf-8'))
-    content = data['choices'][0]['message']['content']
-    if not content or not content.strip():
-        sys.stderr.write(f'[decode] Empty content! finish_reason={data["choices"][0].get("finish_reason")} prompt_tokens={data.get("usage",{}).get("prompt_tokens")}\n')
+    choice = data['choices'][0]
+    content = choice.get('message', {}).get('content') or ''
+    finish = choice.get('finish_reason')
+    if not content.strip():
+        sys.stderr.write(f'[stepfun] empty content finish={finish} usage={data.get("usage")}\n')
+    return content
+
+
+def _build_profile_block(profile):
+    if not (profile and isinstance(profile, dict)):
+        return ''
+    parts = []
+    labels = {
+        'name': '称呼', 'relation': '关系', 'age': '年龄段', 'personality': '性格特征',
+        'background': '背景信息', 'myThoughts': '你对TA的想法',
+        'theirThoughts': '你猜TA对你的想法', 'history': '历史互动与反馈',
+    }
+    for k, label in labels.items():
+        v = profile.get(k)
+        if v and str(v).strip():
+            parts.append(f'  {label}：{v}')
+    return '\n\n【目标对象档案】\n' + '\n'.join(parts) if parts else ''
+
+
+def call_llm_decode(user_text, profile=None):
+    user_content = f'需要解码的消息：\n「{user_text}」{_build_profile_block(profile)}'
+    content = _stepfun_chat(
+        messages=[
+            {'role': 'system', 'content': SYSTEM_PROMPT},
+            {'role': 'user', 'content': user_content},
+        ],
+        temperature=0.85,
+        max_tokens=2000,
+        json_mode=True,
+        timeout=60,
+    )
+    if not content.strip():
+        sys.stderr.write(f'[decode] empty content for input: {user_text[:30]!r}\n')
     return content
 
 
@@ -216,8 +187,8 @@ FALLBACKS = {
 def _local_fallback(text):
     for key, val in FALLBACKS.items():
         if key != 'default' and key in text:
-            return {**val, 'fallback': True}
-    return {**FALLBACKS['default'], 'fallback': True}
+            return {**val, 'fallback': True, 'degraded': True}
+    return {**FALLBACKS['default'], 'fallback': True, 'degraded': True}
 
 
 def _validate(parsed, user_text):
@@ -228,6 +199,7 @@ def _validate(parsed, user_text):
     valid_emotions = {'happy','tired','anxious','wronged','annoyed','indifferent','flirty','defensive'}
     fb = _local_fallback(user_text)
     fb.pop('fallback', None)
+    fb.pop('degraded', None)
     for k in required:
         if not parsed.get(k) or (k == 'danger_level' and parsed.get(k) not in valid_dangers) or (k == 'emotion_tag' and parsed.get(k) not in valid_emotions):
             parsed[k] = fb.get(k, FALLBACKS['default'][k])
@@ -244,6 +216,7 @@ def _batch_fallback(text):
         'health_detail': '关系有裂痕但还能修复，需要调整沟通节奏。',
         'advice': '停3天主动联系。在这3天里有情绪就写下来不发送。让TA主动来找你一次。',
         'cat_whisper': '先学会暂停，TA会来找你的',
+        'degraded': True,
     }
 
 
@@ -275,10 +248,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == '/api/status':
-            now = time.time()
-            with KEY_LOCK:
-                keys = [{'key': k[:8]+'…', 'status': 'ready' if KEY_COOLDOWN.get(k,0)<=now else 'cooling'} for k in API_KEYS]
-            self._send_json({'model': MODEL, 'keys': keys})
+            self._send_json({
+                'model': STEPFUN_MODEL,
+                'provider': 'stepfun',
+                'key_configured': bool(STEPFUN_KEY),
+            })
         elif self.path == '/api/demos':
             self._send_json({'demos': DEMO_PRESETS})
         else:
@@ -295,59 +269,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({'error': 'text is required'}, 400)
                 return
 
-            keys = _available_keys()
-            # 有档案时优先用通用端点（coding 端点对长 prompt 偶发返回空）
-            if profile:
-                endpoints = [(GENERAL_URL,'general'), (CODING_URL,'coding')]
-            else:
-                endpoints = [(CODING_URL,'coding'), (GENERAL_URL,'general')]
             content = None
-            err = None
-            tried = []
+            try:
+                content = call_llm_decode(text, profile)
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode('utf-8', errors='ignore')[:300]
+                sys.stderr.write(f'[decode] stepfun HTTP {e.code}: {err_body}\n')
+            except urllib.error.URLError as e:
+                sys.stderr.write(f'[decode] stepfun URLError: {e}\n')
+            except Exception as e:
+                sys.stderr.write(f'[decode] stepfun error: {e}\n')
 
-            for key in keys:
-                for ep_url, ep_label in endpoints:
-                    tag = f'{key[:8]}…/{ep_label}'
-                    try:
-                        content = call_zhipu(text, ep_url, key, profile)
-                        if content and content.strip():
-                            tried.append(f'{tag}=OK')
-                            break
-                        else:
-                            tried.append(f'{tag}=EMPTY')
-                            content = None
-                            continue
-                    except urllib.error.HTTPError as e:
-                        err_body = e.read().decode('utf-8', errors='ignore')[:300]
-                        err = f'{tag} HTTP {e.code}'
-                        tried.append(f'{tag}=HTTP{e.code}')
-                        if _is_quota_error(e.code, err_body):
-                            _cool_key(key, _parse_cooldown_until(err_body), f'HTTP {e.code}')
-                            break
-                        if e.code in (401, 403):
-                            break
-                    except Exception as e:
-                        err = f'{tag} error'
-                        tried.append(f'{tag}=ERR')
-                    except urllib.error.HTTPError as e:
-                        err_body = e.read().decode('utf-8', errors='ignore')[:300]
-                        err = f'{tag} HTTP {e.code}'
-                        tried.append(f'{tag}=HTTP{e.code}')
-                        if _is_quota_error(e.code, err_body):
-                            _cool_key(key, _parse_cooldown_until(err_body), f'HTTP {e.code}')
-                            break
-                        if e.code in (401, 403):
-                            break
-                    except Exception as e:
-                        err = f'{tag} error'
-                        tried.append(f'{tag}=ERR')
-                if content is not None:
-                    break
-
-            sys.stderr.write(f'[decode] tried: {tried}\n')
-
-            if content is None:
-                self._send_json(_local_fallback(text))
+            if not content or not content.strip():
+                self._send_json_safe(_local_fallback(text))
                 return
 
             try:
@@ -364,10 +298,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     parsed = _local_fallback(text)
 
             parsed = _validate(parsed, text)
-            self._send_json(parsed)
+            self._send_json_safe(parsed)
 
         except Exception as e:
-            self._send_json({**_local_fallback(body.get('text','') if isinstance(body,dict) else ''), 'error': str(e)})
+            sys.stderr.write(f'[decode] outer exception: {e}\n')
+            self._send_json_safe({**_local_fallback(body.get('text','') if isinstance(body,dict) else ''), 'error': str(e)})
 
     def _handle_batch(self):
         try:
@@ -379,53 +314,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({'error': 'text is required'}, 400)
                 return
 
-            keys = _available_keys()
-            endpoints = [(GENERAL_URL,'general'), (CODING_URL,'coding')]
             content = None
-            tried = []
+            try:
+                content = _stepfun_chat(
+                    messages=[
+                        {'role': 'system', 'content': BATCH_PROMPT},
+                        {'role': 'user', 'content': f'聊天记录：\n{text}'},
+                    ],
+                    temperature=0.85,
+                    max_tokens=2000,
+                    json_mode=True,
+                    timeout=60,
+                )
+            except urllib.error.HTTPError as e:
+                err_body = e.read().decode('utf-8', errors='ignore')[:300]
+                sys.stderr.write(f'[batch] stepfun HTTP {e.code}: {err_body}\n')
+            except urllib.error.URLError as e:
+                sys.stderr.write(f'[batch] stepfun URLError: {e}\n')
+            except Exception as e:
+                sys.stderr.write(f'[batch] stepfun error: {e}\n')
 
-            for key in keys:
-                for ep_url, ep_label in endpoints:
-                    tag = f'{key[:8]}…/{ep_label}'
-                    try:
-                        payload = {
-                            'model': MODEL,
-                            'messages': [
-                                {'role': 'system', 'content': BATCH_PROMPT},
-                                {'role': 'user', 'content': f'聊天记录：\n{text}'},
-                            ],
-                            'temperature': 0.85,
-                            'max_tokens': 2000,
-                            'response_format': {'type': 'json_object'},
-                        }
-                        req = urllib.request.Request(ep_url,
-                            data=json.dumps(payload).encode('utf-8'),
-                            headers={'Content-Type':'application/json','Authorization':f'Bearer {key}'},
-                            method='POST')
-                        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                        with opener.open(req, timeout=60) as resp:
-                            data = json.loads(resp.read().decode('utf-8'))
-                        c = data['choices'][0]['message']['content']
-                        if c and c.strip():
-                            content = c
-                            tried.append(f'{tag}=OK')
-                            break
-                        tried.append(f'{tag}=EMPTY')
-                    except urllib.error.HTTPError as e:
-                        err_body = e.read().decode('utf-8', errors='ignore')[:200]
-                        tried.append(f'{tag}=HTTP{e.code}')
-                        if _is_quota_error(e.code, err_body):
-                            _cool_key(key, _parse_cooldown_until(err_body), f'HTTP {e.code}')
-                            break
-                        if e.code in (401, 403): break
-                    except Exception:
-                        tried.append(f'{tag}=ERR')
-                if content: break
-
-            sys.stderr.write(f'[batch] tried: {tried}\n')
-
-            if content is None:
-                self._send_json(_batch_fallback(text))
+            if not content or not content.strip():
+                self._send_json_safe(_batch_fallback(text))
                 return
 
             try:
@@ -434,10 +344,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 m = re.search(r'\{[\s\S]*\}', content)
                 parsed = json.loads(m.group(0)) if m else _batch_fallback(text)
 
-            self._send_json(parsed)
+            self._send_json_safe(parsed)
 
         except Exception as e:
-            self._send_json({**_batch_fallback(''), 'error': str(e)})
+            sys.stderr.write(f'[batch] outer exception: {e}\n')
+            self._send_json_safe({**_batch_fallback(''), 'error': str(e)})
 
     def _handle_parse_image(self):
         try:
@@ -501,7 +412,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     method='POST',
                 )
                 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-                with opener.open(req, timeout=120) as resp:
+                # Render 网关 100s 强制断连，留 15s 余量给响应写回
+                with opener.open(req, timeout=85) as resp:
                     data = json.loads(resp.read().decode('utf-8'))
                 choice = data['choices'][0]
                 c = choice.get('message', {}).get('content') or ''
@@ -510,15 +422,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     content = c.strip()
                     sys.stderr.write(f'[parse_image] success mime={mime} finish={finish}\n')
                 else:
-                    sys.stderr.write(f'[parse_image] empty content finish={finish} usage={data.get('usage')}\n')
+                    sys.stderr.write(f'[parse_image] empty content finish={finish} usage={data.get("usage")}\n')
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode('utf-8', errors='ignore')[:300]
                 sys.stderr.write(f'[parse_image] stepfun HTTP {e.code}: {err_body}\n')
-                self._send_json({'error': f'stepfun HTTP {e.code}', 'details': err_body}, 502)
+                self._send_json_safe({'error': f'stepfun HTTP {e.code}', 'details': err_body}, 502)
+                return
+            except urllib.error.URLError as e:
+                # 多为 write timed out（Render 100s 网关限制）
+                sys.stderr.write(f'[parse_image] stepfun URLError: {e}\n')
+                self._send_json_safe({'error': '识别超时，请换一张更小的图或手动输入'}, 504)
                 return
             except Exception as e:
                 sys.stderr.write(f'[parse_image] stepfun error: {e}\n')
-                self._send_json({'error': f'stepfun error: {e}'}, 502)
+                self._send_json_safe({'error': f'stepfun error: {e}'}, 502)
                 return
 
             if content:
@@ -528,7 +445,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         except Exception as e:
             sys.stderr.write(f'[parse_image] exception: {e}\n')
-            self._send_json({'error': str(e)}, 500)
+            self._send_json_safe({'error': str(e)}, 500)
 
     def _send_json(self, obj, status=200):
         data = json.dumps(obj, ensure_ascii=False).encode('utf-8')
@@ -537,7 +454,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Content-Length', len(data))
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # 客户端先断了，无需处理
+
+    def _send_json_safe(self, obj, status=200):
+        # 出错路径用：客户端可能已经断开，写响应失败时不要引发连锁异常
+        try:
+            self._send_json(obj, status)
+        except Exception:
+            pass
 
     def log_message(self, fmt, *args):
         pass  # 静默日志
