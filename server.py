@@ -270,18 +270,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
 
             content = None
+            degraded_reason = None
             try:
                 content = call_llm_decode(text, profile)
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode('utf-8', errors='ignore')[:300]
+                degraded_reason = f'StepFun HTTP {e.code}'
                 sys.stderr.write(f'[decode] stepfun HTTP {e.code}: {err_body}\n')
             except urllib.error.URLError as e:
+                degraded_reason = f'StepFun 网络超时 ({e.reason})'
                 sys.stderr.write(f'[decode] stepfun URLError: {e}\n')
             except Exception as e:
+                degraded_reason = f'StepFun 调用异常: {e}'
                 sys.stderr.write(f'[decode] stepfun error: {e}\n')
 
             if not content or not content.strip():
-                self._send_json_safe(_local_fallback(text))
+                fb = _local_fallback(text)
+                if degraded_reason:
+                    fb['degraded_reason'] = degraded_reason
+                if not STEPFUN_KEY:
+                    fb['degraded_reason'] = '服务端未配置 STEPFUN_KEY 环境变量'
+                self._send_json_safe(fb)
                 return
 
             try:
@@ -294,8 +303,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         parsed = json.loads(m.group(0))
                     except Exception:
                         parsed = _local_fallback(text)
+                        parsed['degraded_reason'] = 'StepFun 返回内容不是合法 JSON，已用兜底'
                 else:
                     parsed = _local_fallback(text)
+                    parsed['degraded_reason'] = 'StepFun 返回内容不是合法 JSON，已用兜底'
 
             parsed = _validate(parsed, text)
             self._send_json_safe(parsed)
@@ -315,6 +326,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return
 
             content = None
+            degraded_reason = None
             try:
                 content = _stepfun_chat(
                     messages=[
@@ -328,21 +340,38 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 )
             except urllib.error.HTTPError as e:
                 err_body = e.read().decode('utf-8', errors='ignore')[:300]
+                degraded_reason = f'StepFun HTTP {e.code}'
                 sys.stderr.write(f'[batch] stepfun HTTP {e.code}: {err_body}\n')
             except urllib.error.URLError as e:
+                degraded_reason = f'StepFun 网络超时 ({e.reason})'
                 sys.stderr.write(f'[batch] stepfun URLError: {e}\n')
             except Exception as e:
+                degraded_reason = f'StepFun 调用异常: {e}'
                 sys.stderr.write(f'[batch] stepfun error: {e}\n')
 
             if not content or not content.strip():
-                self._send_json_safe(_batch_fallback(text))
+                fb = _batch_fallback(text)
+                if degraded_reason:
+                    fb['degraded_reason'] = degraded_reason
+                if not STEPFUN_KEY:
+                    fb['degraded_reason'] = '服务端未配置 STEPFUN_KEY 环境变量'
+                self._send_json_safe(fb)
                 return
 
             try:
                 parsed = json.loads(content)
             except json.JSONDecodeError:
+                sys.stderr.write(f'[batch] JSON parse failed, raw (first 500):\n{content[:500]}\n')
                 m = re.search(r'\{[\s\S]*\}', content)
-                parsed = json.loads(m.group(0)) if m else _batch_fallback(text)
+                if m:
+                    try:
+                        parsed = json.loads(m.group(0))
+                    except Exception:
+                        parsed = _batch_fallback(text)
+                        parsed['degraded_reason'] = 'StepFun 返回不是合法 JSON，已用兜底'
+                else:
+                    parsed = _batch_fallback(text)
+                    parsed['degraded_reason'] = 'StepFun 返回不是合法 JSON，已用兜底'
 
             self._send_json_safe(parsed)
 

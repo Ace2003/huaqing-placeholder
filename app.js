@@ -76,7 +76,7 @@
         lastBatchResult = { original: text, ...result };
         showBatchResult(result);
         recordBatchDecode(text, result);
-        if (result.degraded) toast('AI 服务暂时失灵，显示的是兜底预录');
+        if (result.degraded) toast('AI 失灵：' + (result.degraded_reason || '显示兜底预录'));
       } else {
         const profile = getSelectedProfile();
         const res = await fetch('/api/decode', {
@@ -88,7 +88,7 @@
         if (window.CatAudio) { if (thinkingSound) CatAudio.stopThinking(thinkingSound); CatAudio.playReveal(); }
         showResult(text, result);
         recordDecode(text, result);
-        if (result.degraded) toast('AI 服务暂时失灵，显示的是兜底预录');
+        if (result.degraded) toast('AI 失灵：' + (result.degraded_reason || '显示兜底预录'));
       }
     } catch (e) {
       toast('网络抖了一下，再试一次');
@@ -752,10 +752,11 @@
 
     btnUpload.addEventListener('click', () => fileInput.click());
 
-    fileInput.addEventListener('change', (e) => {
+    fileInput.addEventListener('change', async (e) => {
       const files = Array.from(e.target.files || []);
-      if (files.length) files.forEach(addImageFile);
       fileInput.value = ''; // 允许再次选同样的文件
+      // 串行处理，避免 StepFun 并发限速
+      for (const f of files) await addImageFile(f);
     });
 
     uploadSection.addEventListener('dragover', (e) => {
@@ -767,22 +768,30 @@
       uploadSection.style.borderColor = '';
       uploadSection.style.background = '';
     });
-    uploadSection.addEventListener('drop', (e) => {
+    uploadSection.addEventListener('drop', async (e) => {
       e.preventDefault();
       uploadSection.style.borderColor = '';
       uploadSection.style.background = '';
       const files = Array.from(e.dataTransfer.files || []).filter(f => f.type.startsWith('image/'));
-      if (files.length) files.forEach(addImageFile);
+      for (const f of files) await addImageFile(f);
     });
 
-    // 缩略图列表点 × 删除单张
-    preview.addEventListener('click', (e) => {
+    // 预览区点击：× 删除单张；失败缩略图本身可点重试
+    preview.addEventListener('click', async (e) => {
       const btn = e.target.closest('.btn-remove');
-      if (!btn) return;
-      const id = +btn.dataset.id;
-      imageQueue = imageQueue.filter(it => it.id !== id);
-      renderImagePreview();
-      flushToTextarea();
+      if (btn) {
+        const id = +btn.dataset.id;
+        imageQueue = imageQueue.filter(it => it.id !== id);
+        renderImagePreview();
+        flushToTextarea();
+        return;
+      }
+      const thumb = e.target.closest('.img-thumb.failed');
+      if (thumb) {
+        const id = +thumb.dataset.id;
+        const item = imageQueue.find(it => it.id === id);
+        if (item) await retryImageItem(item);
+      }
     });
 
     async function addImageFile(file) {
@@ -790,11 +799,10 @@
       let item;
       try {
         const { dataUrl, base64, mime } = await compressImage(file);
-        item = { id, dataUrl, base64, mime, status: 'processing', text: '' };
+        item = { id, dataUrl, base64, mime, status: 'processing', text: '', errorReason: '' };
         imageQueue.push(item);
       } catch (e) {
-        // 压缩失败也保留位置，但标记失败
-        item = { id, dataUrl: '', base64: '', mime: '', status: 'failed', text: '' };
+        item = { id, dataUrl: '', base64: '', mime: '', status: 'failed', text: '', errorReason: '压缩失败：' + e.message };
         imageQueue.push(item);
         renderImagePreview();
         updateStatus();
@@ -802,7 +810,25 @@
       }
       renderImagePreview();
       updateStatus();
-      // 后端调用 — 单张独立
+      await identifyImage(item);
+    }
+
+    async function retryImageItem(item) {
+      item.status = 'processing';
+      item.errorReason = '';
+      renderImagePreview();
+      updateStatus();
+      await identifyImage(item);
+    }
+
+    // 单张图识别（共用初次+重试）
+    async function identifyImage(item) {
+      if (!item.base64) {
+        item.status = 'failed';
+        item.errorReason = '无图像数据';
+        renderImagePreview(); updateStatus(); flushToTextarea();
+        return;
+      }
       try {
         const res = await fetch('/api/parse_image', {
           method: 'POST',
@@ -813,12 +839,15 @@
         if (result.error || !result.text) {
           item.status = 'failed';
           item.text = '';
+          item.errorReason = result.error || result.details || '模型未返回结果';
         } else {
           item.status = 'ok';
           item.text = result.text.trim();
+          item.errorReason = '';
         }
       } catch (e) {
         item.status = 'failed';
+        item.errorReason = '网络异常：' + e.message;
       }
       renderImagePreview();
       updateStatus();
@@ -832,12 +861,13 @@
         return;
       }
       preview.classList.remove('hidden');
-      // 按 imageQueue 顺序展示
       preview.innerHTML = imageQueue.map((it, i) => {
         const cls = it.status === 'processing' ? 'processing' : (it.status === 'failed' ? 'failed' : '');
         const src = it.dataUrl || '';
+        const title = it.status === 'failed' ? (it.errorReason || '识别失败，点击重试') : '';
+        const cursor = it.status === 'failed' ? 'cursor:pointer;' : '';
         return `
-          <div class="img-thumb ${cls}">
+          <div class="img-thumb ${cls}" data-id="${it.id}" title="${title}" style="${cursor}">
             <img src="${src}" alt="图${i + 1}">
             <span class="img-thumb-order">${i + 1}</span>
             <button class="btn-remove" data-id="${it.id}" title="移除">✕</button>
@@ -856,7 +886,9 @@
       if (processing > 0) {
         statusText.textContent = `识别中… ${ok}/${total}`;
       } else if (failed > 0) {
-        statusText.textContent = `识别完成 ${ok}/${total}（${failed} 张失败，可点击 ✕ 移除重试）`;
+        // 失败时把第一张失败原因显示出来，方便用户判断
+        const firstFail = imageQueue.find(it => it.status === 'failed');
+        statusText.textContent = `${ok}/${total} 成功（${failed} 张失败：${firstFail?.errorReason || '未知'}，点击失败缩略图重试）`;
       } else {
         statusText.textContent = `识别完成 ✓ ${total} 张`;
       }
